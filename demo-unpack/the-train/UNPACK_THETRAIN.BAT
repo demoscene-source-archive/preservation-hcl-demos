@@ -1,0 +1,8 @@
+@ECHO OFF
+"%~dp0..\..\bin\hcl_unpack.exe" "%~dp0THETRAIN.HCL" "%~dp0THETRAIN"
+SET "HCL_RESULT=%ERRORLEVEL%"
+
+ECHO.
+IF NOT "%HCL_RESULT%"=="0" ECHO Extraction failed with exit code %HCL_RESULT%.
+PAUSE
+EXIT /B %HCL_RESULT%
