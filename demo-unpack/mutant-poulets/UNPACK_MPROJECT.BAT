@@ -1,5 +1,5 @@
 @ECHO OFF
-"%~dp0hcl_unpack.exe" "%~dp0MPROJECT.DAT" "%~dp0MPROJECT"
+"%~dp0..\..\bin\hcl_unpack.exe" "%~dp0MPROJECT.DAT" "%~dp0MPROJECT"
 SET "HCL_RESULT=%ERRORLEVEL%"
 
 ECHO.
