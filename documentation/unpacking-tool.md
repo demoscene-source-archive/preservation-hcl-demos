@@ -8,7 +8,10 @@
 | `hcl_unpack.exe` | Prebuilt 64-bit Windows command-line extractor |
 | `UNPACK_BONJOUR.BAT` | Double-clickable launcher configured for the supplied archive |
 
-### Delivered-file fingerprints
+### Original delivered-file fingerprints (historical)
+
+These hashes describe the initial delivery, before the PCX detection and CMake
+updates. They do not identify the current source or rebuilt executable.
 
 | File | SHA-256 |
 |---|---|
@@ -17,6 +20,19 @@
 | `UNPACK_BONJOUR.BAT` | `FAE62B6275D554AE8EAE5FAA7E8EAF7E509BEDAD9EB3B9623999ECB5A8445335` |
 
 ## Normal use
+
+For the current repository build commands, see [the root README](../README.md).
+The executable is now located at `bin/hcl_unpack.exe`; demo launchers reference
+it relative to their own directory.
+
+When an archive entry ends in `.HCL` (ignoring case), the extractor checks its
+PCX header, dimensions, plane/stride consistency, and pixel stream length
+(including RLE decoding when used). Version 5 images with one 8-bit plane
+must also have a trailing 256-color palette and its marker. A matching entry
+is extracted with `.PCX` appended to its original name, without changing its
+bytes. Nonmatching entries retain their original names. Output-name collisions
+introduced by this suffix are rejected before creating the output directory.
+All 22 numbered `.hcl` entries in The Train are recognized as PCX images.
 
 Run `UNPACK_BONJOUR.BAT` from the release directory. It invokes:
 

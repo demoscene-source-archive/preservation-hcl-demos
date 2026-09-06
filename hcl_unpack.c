@@ -1,10 +1,12 @@
 /*
- * Minimal HCL archive extractor for Bonjour Madame (HCL, 1998).
+ * Minimal HCL archive extractor for HCL demos.
+ * Embedded .HCL files containing PCX images are written with a .PCX suffix.
  *
  * No third-party library is required. Archive and output files are accessed
  * through the C stdio API (fopen/fread/fwrite/fseek).
  *
  * Build examples:
+ *   CMake: cmake -S . -B build && cmake --build build --config Release
  *   Microsoft C: cl /nologo /W4 /O2 /MT hcl_unpack.c /Fe:hcl_unpack.exe
  *   MinGW GCC:   gcc -std=c99 -Wall -Wextra -O2 -o hcl_unpack.exe hcl_unpack.c
  *
@@ -40,6 +42,7 @@
 
 typedef struct HclEntry {
     char name[HCL_NAME_SIZE + 1u];
+    char output_name[HCL_NAME_SIZE + 5u];
     uint32_t offset;
     uint32_t size;
 } HclEntry;
@@ -95,6 +98,110 @@ static int valid_output_name(const char *name)
         ++cursor;
     }
 
+    return 1;
+}
+
+static unsigned int read_le16(const unsigned char *bytes)
+{
+    return (unsigned int)bytes[0] | ((unsigned int)bytes[1] << 8);
+}
+
+/* Recognize a complete PCX image, not just its manufacturer byte.
+ * Return -1 on an I/O error, 0 for other data, and 1 for a valid PCX.
+ * The caller must seek again before copying the entry.
+ */
+static int entry_is_pcx(FILE *archive, const HclEntry *entry)
+{
+    unsigned char header[128];
+    uint32_t remaining;
+    uint64_t decoded = 0u;
+    uint64_t expected;
+    unsigned int width, height, stride, planes, bits;
+
+    if (entry->size < sizeof(header)) {
+        return 0;
+    }
+    if (entry->offset > (uint32_t)LONG_MAX ||
+        fseek(archive, (long)entry->offset, SEEK_SET) != 0 ||
+        !read_exact(archive, header, sizeof(header))) {
+        return -1;
+    }
+    bits = header[3];
+    planes = header[65];
+    stride = read_le16(header + 66);
+    if (header[0] != 10u ||
+        (header[1] != 0u && header[1] != 2u && header[1] != 3u && header[1] != 5u) ||
+        header[2] > 1u || header[64] != 0u ||
+        (bits != 1u && bits != 2u && bits != 4u && bits != 8u) ||
+        planes == 0u || planes > 4u || stride == 0u ||
+        read_le16(header + 8) < read_le16(header + 4) ||
+        read_le16(header + 10) < read_le16(header + 6)) {
+        return 0;
+    }
+    width = read_le16(header + 8) - read_le16(header + 4) + 1u;
+    height = read_le16(header + 10) - read_le16(header + 6) + 1u;
+    if (stride < (width * bits + 7u) / 8u) {
+        return 0;
+    }
+    expected = (uint64_t)stride * planes * height;
+    remaining = entry->size - (uint32_t)sizeof(header);
+    while (decoded < expected && remaining > 0u) {
+        int value = fgetc(archive);
+        unsigned int run = 1u;
+        if (value == EOF) {
+            return -1;
+        }
+        --remaining;
+        if (header[2] == 1u && (value & 0xc0) == 0xc0) {
+            run = (unsigned int)value & 0x3fu;
+            if (run == 0u || remaining == 0u) {
+                return 0;
+            }
+            if (fgetc(archive) == EOF) {
+                return -1;
+            }
+            --remaining;
+        }
+        decoded += run;
+    }
+    if (decoded != expected) {
+        return 0;
+    }
+    if (bits == 8u && planes == 1u && header[1] == 5u) {
+        int marker;
+        if (remaining != 769u) {
+            return 0;
+        }
+        marker = fgetc(archive);
+        return marker == EOF ? -1 : marker == 12;
+    }
+    return remaining == 0u;
+}
+
+static int prepare_output_names(FILE *archive, HclEntry *entries, uint32_t count)
+{
+    uint32_t index, previous;
+    for (index = 0u; index < count; ++index) {
+        HclEntry *entry = &entries[index];
+        const char *extension = strrchr(entry->name, '.');
+        strcpy(entry->output_name, entry->name);
+        if (extension != NULL && ascii_equal_ignore_case(extension, ".hcl")) {
+            int pcx = entry_is_pcx(archive, entry);
+            if (pcx < 0) {
+                fprintf(stderr, "Error: cannot inspect '%s' for PCX data.\n", entry->name);
+                return 0;
+            }
+            if (pcx) {
+                strcat(entry->output_name, ".PCX");
+            }
+        }
+        for (previous = 0u; previous < index; ++previous) {
+            if (ascii_equal_ignore_case(entry->output_name, entries[previous].output_name)) {
+                fprintf(stderr, "Error: duplicate output filename '%s'.\n", entry->output_name);
+                return 0;
+            }
+        }
+    }
     return 1;
 }
 
@@ -281,7 +388,7 @@ static int extract_entry(FILE *archive,
     FILE *output;
     uint32_t remaining;
 
-    output_path = make_output_path(output_directory, entry->name);
+    output_path = make_output_path(output_directory, entry->output_name);
     if (output_path == NULL) {
         fprintf(stderr, "Error: out of memory while building an output path.\n");
         return 0;
@@ -345,7 +452,7 @@ static int extract_entry(FILE *archive,
     }
 
     printf("Extracted %-12s %10lu bytes\n",
-           entry->name, (unsigned long)entry->size);
+           entry->output_name, (unsigned long)entry->size);
     free(output_path);
     return 1;
 }
@@ -396,7 +503,8 @@ int main(int argc, char **argv)
     if (!load_directory(archive,
                         (uint64_t)archive_length,
                         entries,
-                        &entry_count)) {
+                        &entry_count) ||
+        !prepare_output_names(archive, entries, entry_count)) {
         fclose(archive);
         return EXIT_FAILURE;
     }
