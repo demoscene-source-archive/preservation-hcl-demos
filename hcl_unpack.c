@@ -1,6 +1,6 @@
 /*
  * Minimal HCL archive extractor for HCL demos.
- * Embedded .HCL files containing PCX images are written with a .PCX suffix.
+ * Recognized .HCL assets receive a .PCX or .3DS suffix, without byte changes.
  *
  * No third-party library is required. Archive and output files are accessed
  * through the C stdio API (fopen/fread/fwrite/fseek).
@@ -12,6 +12,7 @@
  *
  * Usage:
  *   hcl_unpack BONJOUR.HCL BONJOUR
+ *   hcl_unpack --asset 04.HCL MATRIX
  */
 
 #if defined(_MSC_VER)
@@ -41,8 +42,8 @@
 #define COPY_BUFFER_SIZE 65536u
 
 typedef struct HclEntry {
-    char name[HCL_NAME_SIZE + 1u];
-    char output_name[HCL_NAME_SIZE + 5u];
+    char name[256];
+    char output_name[260];
     uint32_t offset;
     uint32_t size;
 } HclEntry;
@@ -178,6 +179,50 @@ static int entry_is_pcx(FILE *archive, const HclEntry *entry)
     return remaining == 0u;
 }
 
+/* Validate the 3DS root size and all immediate child chunk boundaries.
+ * Require an editor chunk (0x3D3D), as found in the Matrix model assets.
+ * This identifies the container; it does not validate mesh semantics.
+ */
+static int entry_is_3ds(FILE *archive, const HclEntry *entry)
+{
+    unsigned char header[6];
+    uint32_t position = 6u;
+    int has_editor = 0;
+
+    if (entry->size < 12u) {
+        return 0;
+    }
+    if (entry->offset > (uint32_t)LONG_MAX ||
+        fseek(archive, (long)entry->offset, SEEK_SET) != 0 ||
+        !read_exact(archive, header, sizeof(header))) {
+        return -1;
+    }
+    if (read_le16(header) != 0x4d4du || read_le32(header + 2) != entry->size) {
+        return 0;
+    }
+    while (position < entry->size) {
+        uint32_t length;
+        uint64_t offset = (uint64_t)entry->offset + position;
+        if (entry->size - position < sizeof(header)) {
+            return 0;
+        }
+        if (offset > (uint64_t)LONG_MAX ||
+            fseek(archive, (long)offset, SEEK_SET) != 0 ||
+            !read_exact(archive, header, sizeof(header))) {
+            return -1;
+        }
+        length = read_le32(header + 2);
+        if (length < sizeof(header) || length > entry->size - position) {
+            return 0;
+        }
+        if (read_le16(header) == 0x3d3du) {
+            has_editor = 1;
+        }
+        position += length;
+    }
+    return has_editor;
+}
+
 static int prepare_output_names(FILE *archive, HclEntry *entries, uint32_t count)
 {
     uint32_t index, previous;
@@ -193,6 +238,17 @@ static int prepare_output_names(FILE *archive, HclEntry *entries, uint32_t count
             }
             if (pcx) {
                 strcat(entry->output_name, ".PCX");
+            } else {
+                int model = entry_is_3ds(archive, entry);
+                if (model < 0) {
+                    fprintf(stderr, "Error: cannot inspect '%s' for 3DS data.\n", entry->name);
+                    return 0;
+                }
+                if (model) {
+                    strcat(entry->output_name, ".3DS");
+                } else {
+                    printf("Unrecognized format: %s (keeping original name)\n", entry->name);
+                }
             }
         }
         for (previous = 0u; previous < index; ++previous) {
@@ -461,8 +517,9 @@ static void print_usage(const char *program_name)
 {
     fprintf(stderr,
             "Usage: %s <archive.hcl> <output-directory>\n"
+            "       %s --asset <file.HCL> <output-directory>\n"
             "Example: %s BONJOUR.HCL BONJOUR\n",
-            program_name, program_name);
+            program_name, program_name, program_name);
 }
 
 int main(int argc, char **argv)
@@ -474,46 +531,75 @@ int main(int argc, char **argv)
     uint32_t index;
     unsigned char *copy_buffer;
     int result = EXIT_FAILURE;
+    int asset_mode = argc == 4 && strcmp(argv[1], "--asset") == 0;
+    const char *input_path;
+    const char *output_directory;
 
-    if (argc != 3) {
+    if (argc != 3 && !asset_mode) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
-    archive = fopen(argv[1], "rb");
+    input_path = argv[asset_mode ? 2 : 1];
+    output_directory = argv[asset_mode ? 3 : 2];
+    archive = fopen(input_path, "rb");
     if (archive == NULL) {
         fprintf(stderr, "Error: cannot open archive '%s': %s\n",
-                argv[1], strerror(errno));
+                input_path, strerror(errno));
         return EXIT_FAILURE;
     }
 
     if (fseek(archive, 0L, SEEK_END) != 0 ||
         (archive_length = ftell(archive)) < 0L) {
-        fprintf(stderr, "Error: cannot determine the size of '%s'.\n", argv[1]);
+        fprintf(stderr, "Error: cannot determine the size of '%s'.\n", input_path);
         fclose(archive);
         return EXIT_FAILURE;
     }
 
-    if ((uint64_t)archive_length < (uint64_t)HCL_HEADER_SIZE) {
-        fprintf(stderr, "Error: '%s' is too small to be an HCL archive.\n", argv[1]);
+    if ((uint64_t)archive_length > UINT32_MAX) {
+        fprintf(stderr, "Error: input exceeds the supported 32-bit size.\n");
         fclose(archive);
         return EXIT_FAILURE;
     }
 
-    if (!load_directory(archive,
+    if (asset_mode) {
+        const char *name = input_path;
+        const char *cursor;
+        for (cursor = input_path; *cursor != '\0'; ++cursor) {
+            if (*cursor == '/' || *cursor == '\\') {
+                name = cursor + 1;
+            }
+        }
+        if (!valid_output_name(name) || strlen(name) >= sizeof(entries[0].name)) {
+            fprintf(stderr, "Error: invalid or too long asset filename.\n");
+            fclose(archive);
+            return EXIT_FAILURE;
+        }
+        strcpy(entries[0].name, name);
+        entries[0].offset = 0u;
+        entries[0].size = (uint32_t)archive_length;
+        entry_count = 1u;
+    } else if ((uint64_t)archive_length < (uint64_t)HCL_HEADER_SIZE) {
+        fprintf(stderr, "Error: '%s' is too small to be an HCL archive.\n", input_path);
+        fclose(archive);
+        return EXIT_FAILURE;
+    } else if (!load_directory(archive,
                         (uint64_t)archive_length,
                         entries,
-                        &entry_count) ||
-        !prepare_output_names(archive, entries, entry_count)) {
+                        &entry_count)) {
+        fclose(archive);
+        return EXIT_FAILURE;
+    }
+    if (!prepare_output_names(archive, entries, entry_count)) {
         fclose(archive);
         return EXIT_FAILURE;
     }
 
-    printf("Archive: %s\n", argv[1]);
+    printf("%s: %s\n", asset_mode ? "Asset" : "Archive", input_path);
     printf("Entries: %lu\n", (unsigned long)entry_count);
-    printf("Output:  %s\n\n", argv[2]);
+    printf("Output:  %s\n\n", output_directory);
 
-    if (!ensure_output_directory(argv[2])) {
+    if (!ensure_output_directory(output_directory)) {
         fclose(archive);
         return EXIT_FAILURE;
     }
@@ -526,7 +612,7 @@ int main(int argc, char **argv)
     }
 
     for (index = 0u; index < entry_count; ++index) {
-        if (!extract_entry(archive, &entries[index], argv[2], copy_buffer)) {
+        if (!extract_entry(archive, &entries[index], output_directory, copy_buffer)) {
             goto cleanup;
         }
     }

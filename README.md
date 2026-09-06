@@ -24,18 +24,32 @@ multi-configuration generator. MSVC builds use the static C runtime.
 .\bin\hcl_unpack.exe demo-unpack\the-train\THETRAIN.HCL output-train
 ```
 
-Entries with a `.HCL` extension (case-insensitive) are checked for PCX image
-data. Recognized images receive an additional `.PCX` suffix: `00000.hcl`
-becomes `00000.hcl.PCX`. Original filename casing and payload bytes are
-preserved. Other entries retain their names. Existing output files are never
+Entries with a `.HCL` extension (case-insensitive) are checked for PCX images
+and 3D Studio models. Recognized assets receive an additional `.PCX` or `.3DS`
+suffix: `00000.hcl` becomes `00000.hcl.PCX`. PCX detection validates the header,
+encoded pixel length, and palette; 3DS detection validates the root length
+and immediate child chunk boundaries and requires an editor chunk.
+Original filename casing and payload bytes are preserved. Unknown or malformed
+assets retain their names. Existing output files are never
 overwritten; use a fresh output directory to extract again.
+
+Loose assets, such as Matrix's numbered HCL files, use `--asset`:
+
+```powershell
+.\bin\hcl_unpack.exe --asset demo-unpack\matrix\04.HCL output-matrix
+```
+
+Run `demo-unpack/matrix/UNPACK_MATRIX.BAT` to process the whole Matrix release
+into its `MATRIX` subdirectory. Its `01.HCL` and `02.HCL` have nonstandard PCX
+signatures and retain their original names; the tool does not repair bytes.
 
 Run the regression checks after building:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\unpack.ps1
+python tests\unpack.py
 ```
 
-These check all three demo archives against their extracted payload hashes,
-PCX detection and naming, malformed data, and output collision handling.
+These require Python 3 and check all three demo archives against their extracted
+payload hashes, Matrix's 33 loose assets, format detection, malformed data,
+and output collision handling.
 Temporary test outputs are kept under the ignored `build/` directory.
